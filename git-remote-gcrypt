@@ -88,9 +88,8 @@ ENCRYPT()
 	# Symmetric encryption using the long MASTERKEY. We use AES
 	# and OpenPGP's modification detection code (mdc).
 	(printf "%s" "$MASTERKEY" | \
-		gpg --batch --force-mdc --cipher-algo AES256 \
-                        --compression-algo none -c /dev/fd/3 \
-			--passphrase-fd 0 --output -) 3<&0
+		gpg --batch --force-mdc --cipher-algo AES --compress-algo none \
+			--passphrase-fd 0 --output - -c /dev/fd/3) 3<&0
 }
 
 DECRYPT()
@@ -116,7 +115,7 @@ make_new_repo()
 	# ascii-encoded string used for symmetric encryption with GnuPG.
 	local RECIPIENTS
 	echo_info "Setting up new repository at $URL"
-        # Split recipients by space, example "a b c" =>  -R a -R b -R c
+	# Split recipients by space, example "a b c" =>  -R a -R b -R c
 	RECIPIENTS=$(git config gcrypt.recipients | sed -e 's/\([^ ]\+\)/-R &/g')
 	if [ -z "$RECIPIENTS" ]
 	then
@@ -128,7 +127,8 @@ make_new_repo()
 	PUTREPO "$URL"
 	echo_info "Generating new master key"
 	MASTERKEY="$(genkey)"
-	printf "%s" "$MASTERKEY" | gpg --cipher-algo AES256 --compress-algo none --digest-algo sha512 -e $RECIPIENTS | PUT "$URL" masterkey
+	printf "%s" "$MASTERKEY" | \
+		gpg --compress-algo none -e $RECIPIENTS | PUT "$URL" masterkey
 }
 
 ensure_connected()
@@ -171,6 +171,7 @@ do_list()
 
 	printf "%s\n" "$BRANCHLIST" | while read LINE
 	do
+		[ -z "$LINE" ] && break
 		OBJID=${LINE%% *}
 		REFNAME=${LINE##* }
 		echo "$OBJID" "$REFNAME"

@@ -4,9 +4,7 @@
 # Copyright 2013  by Ulrik
 # License: GPLv2 or any later version, see http://www.gnu.org/licenses/
 #
-# Requires GnuPG
-#
-# We read git config gcrypt.recipients when creating new repositories
+# See README
 
 #set -x
 set -e
@@ -17,13 +15,14 @@ genkey()
 	gpg --armor --gen-rand 1 128 | tr -d \\n
 }
 
-sha1()
+pack_hash()
 {
-	gpg --print-md sha1  | tr -d ' ' | tr A-F a-f
+	gpg --print-md SHA224  | tr -d ' ' | tr A-F a-f
 }
 
 LOCALDIR="${GIT_DIR:-.git}/remote-gcrypt"
 DID_FIND_REPO=  # yes for connected, no for no repo
+PACKPFX="pack :SHA224:"
 
 isurl() { test -z "${2%%$1://*}" ; }
 
@@ -88,8 +87,19 @@ ENCRYPT()
 	# Symmetric encryption using the long MASTERKEY. We use AES
 	# and OpenPGP's modification detection code (mdc).
 	(printf "%s" "$MASTERKEY" | \
-		gpg --batch --force-mdc --cipher-algo AES --compress-algo none \
+		gpg --batch --force-mdc --compress-algo none \
 			--passphrase-fd 0 --output - -c /dev/fd/3) 3<&0
+}
+
+CLEARSIGN()
+{
+	if [ "$CONF_SIGN_MANIFEST" = "true" ]
+	then
+		echo_info "Signing new manifest"
+		gpg --output - --clearsign
+	else
+		cat
+	fi
 }
 
 DECRYPT()
@@ -106,7 +116,7 @@ append()
 }
 
 tac() { sed '1!G;h;$!d'; }
-echo_info() { echo "$@" >&2; }
+echo_info() { echo "gcrypt:" "$@" >&2; }
 
 make_new_repo()
 {
@@ -119,9 +129,9 @@ make_new_repo()
 	RECIPIENTS=$(git config gcrypt.recipients | sed -e 's/\([^ ]\+\)/-R &/g')
 	if [ -z "$RECIPIENTS" ]
 	then
-		echo_info "> You must configure which GnuPG recipients can access the repository."
-		echo_info "> To setup for all your git repositories, use::"
-		echo_info ">   git config --global gcrypt.recipients KEYID"
+		echo_info "You must configure which GnuPG recipients can access the repository."
+		echo_info "To setup for all your git repositories, use::"
+		echo_info "  git config --global gcrypt.recipients KEYID"
 		exit 1
 	fi
 	PUTREPO "$URL"
@@ -131,15 +141,24 @@ make_new_repo()
 		gpg --compress-algo none -e $RECIPIENTS | PUT "$URL" masterkey
 }
 
+read_config()
+{
+	CONF_SIGN_MANIFEST=$(git config --bool gcrypt.signmanifest || :)
+	CONF_REQUIRE_SIGN=$(git config --bool gcrypt.requiresign || :)
+}
+
 ensure_connected()
 {
 	local MANIFESTDATA
+	local STRIPDATA
 
 	if [ -n "$DID_FIND_REPO" ]
 	then
 		return
 	fi
 	DID_FIND_REPO=yes
+	read_config
+
 	MASTERKEY="$(get_masterkey)"
 	if [ -z "$MASTERKEY" ]
 	then
@@ -147,8 +166,21 @@ ensure_connected()
 		return
 	fi
 	MANIFESTDATA="$(GET_OR_EMPTY "$URL" manifest | DECRYPT)"
-	BRANCHLIST=$(printf "%s\n" "$MANIFESTDATA" | (grep -v '^pack ' || :))
-	PACKLIST=$(printf "%s\n" "$MANIFESTDATA" | (grep '^pack ' || :))
+	if [ -n "$MANIFESTDATA" -a \( "$CONF_REQUIRE_SIGN" = true -o \
+		-z "${MANIFESTDATA##-----BEGIN*}" \) ]
+	then
+		# Use gpg to verify and strip the signature
+		echo_info "Verifying manifest signature"
+		STRIPDATA=$(printf "%s" "$MANIFESTDATA" | gpg || {
+		echo_info "WARNING: Failed to verify signature from $URL"
+		[ "$CONF_REQUIRE_SIGN" = "true" ] && \
+			echo_info "Exiting per gcrypt.requiresign" && exit 1
+		}
+		)
+		[ -n "$STRIPDATA" ] && MANIFESTDATA=$STRIPDATA
+	fi
+	BRANCHLIST=$(printf "%s\n" "$MANIFESTDATA" | (grep -E '^[0-9a-f]{40}' || :))
+	PACKLIST=$(printf "%s\n" "$MANIFESTDATA" | (grep "^$PACKPFX" || :))
 }
 
 get_masterkey()
@@ -212,8 +244,8 @@ do_fetch()
 
 	printf "%s\n" "$PNEED" | while read PACKLINE
 	do
-		PACK=${PACKLINE#pack }
-		RCVID="$(GET "$URL" "$PACK" | tee "$TMPPACK_ENCRYPTED" | sha1)"
+		PACK=${PACKLINE#"$PACKPFX"}
+		RCVID="$(GET "$URL" "$PACK" | tee "$TMPPACK_ENCRYPTED" | pack_hash)"
 		if [ "$RCVID" != "$PACK" ]
 		then
 			echo_info "Packfile $PACK does not match digest!"
@@ -222,7 +254,7 @@ do_fetch()
 		DECRYPT < "$TMPPACK_ENCRYPTED" | git unpack-objects
 
 		# add to local pack list
-		printf "pack %s\n" "$PACK" >> "$LOCALDIR/have_packs"
+		printf "$PACKPFX%s\n" "$PACK" >> "$LOCALDIR/have_packs"
 	done
 
 	rm -f "$TMPPACK_ENCRYPTED"
@@ -235,11 +267,10 @@ do_push()
 {
 	# Security protocol:
 	# Each git packfile is encrypted and then named for the encrypted
-	# file's SHA-1. The manifest is updated with the pack id.
+	# file's hash. The manifest is updated with the pack id.
 	# The manifest is encrypted.
 	local REMOTEHAS
 	local REMOTEWANT
-	local MANIFESTDATA
 	local prefix_
 	local suffix_
 	ensure_connected
@@ -282,13 +313,14 @@ do_push()
 	# Only send pack if we have any objects to send
 	if [ -s "$TMPOBJLIST" ]
 	then
-		PACKID=$(sha1 < "$TMPPACK_ENCRYPTED")
-		PACKLIST=$(append "$PACKLIST" "pack $PACKID")
+		PACKID=$(pack_hash < "$TMPPACK_ENCRYPTED")
+		PACKLIST=$(append "$PACKLIST" "$PACKPFX$PACKID")
 		PUT "$URL" "$PACKID" < "$TMPPACK_ENCRYPTED"
 	fi
 
-	MANIFESTDATA=$(printf "%s\n%s\n" "$BRANCHLIST" "$PACKLIST")
-	printf "%s\n" "$MANIFESTDATA" | ENCRYPT | PUT "$URL" "manifest"
+	# Put new manifest
+	printf "%s\n%s\n" "$BRANCHLIST" "$PACKLIST" | \
+		CLEARSIGN | ENCRYPT | PUT "$URL" "manifest"
 
 	# ok all updates (not deletes)
 	printf "%s\n" "$1" | while read LINE

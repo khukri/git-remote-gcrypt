@@ -518,6 +518,7 @@ EOF
 }
 
 # Main program, check $URL is supported
+[ ${#@} -ne 2 ] && echo "Need exactly two parameters: $0:  NAME  URL" && exit 1
 NAME=$1
 URL=$2
 ( isurl ssh "$URL" || isurl sftp "$URL" ||

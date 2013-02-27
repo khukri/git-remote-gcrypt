@@ -7,148 +7,172 @@ GNU Privacy Guard-encrypted git remote
 --------------------------------------
 
 :Author: Ulrik Sverdrup
+=======
 :Manual section: 1
 
 Description
 ===========
 
 Remote helper programs are invoked by git to handle network transport.
-This helper handles gcrypt:: URLs that will access a remote repository
+This helper handles `gcrypt::` URLs that will access a remote repository
 encrypted with GPG, using our custom format.
 
-Supported locations are `local`, `ssh://`, `sftp://` and
-`gitception://`. `gcrypt::gitception://<giturl>` allows stacking gcrypt
-on top of any other git transport.
+Supported locations are `local`, `rsync://` and `sftp://`, where the
+repository is stored as a set of files, or instead any `<giturl>` where
+gcrypt will store the same representation in a git repository, bridged
+over arbitrary git transport.
 
-.. NOTE:: Repository format MAY STILL change, incompatibly
+The aim is to provide confidential, authenticated git storage and
+collaboration using typical untrusted file hosts or services.
+PLEASE help us evaluate how well we meet this design goal!
+
+.. NOTE:: This is a development version -- Repository format MAY CHANGE.
 
 Quickstart
 ..........
 
-Install as `git-remote-gcrypt` in `$PATH`.
+* Install ``git-remote-gcrypt`` by running the supplied ``install.sh`` script.
 
-Configure a keyring:
+* Create an encrypted remote by pushing to it::
 
-    ::
-
-        gpg --export KEY1 KEY2 > $PWD/.git/keyring.gpg
-        git config --path gcrypt.keyring $PWD/.git/keyring.gpg
-
-Create an encrypted remote by pushing to it:
-
-    ::
-
-        git remote add cryptremote gcrypt::ssh://example.com:repo
-        git push cryptremote master
-        > gcrypt: Setting up new repository at ssh://example.com:repo
-        > gcrypt: Repository ID  is KNBr0wKzct52
-        > gcrypt: Repository URL is gcrypt::ssh://example.com:repo/G.KNBr0wKzct52
-        > gcrypt: (configuration for cryptremote updated)
-        > [ more lines .. ]
-        > To gcrypt::[...]
-        > * [new branch]      master -> master
-
-Share the updated Repository URL with everyone in the keyring.
-
-(The generated Repository ID is not secret, it only exists to ensure
-that two repositories signed by the same user can not be maliciously
-switched around. It incidentally allows multiple repositories to all
-share location.)
-
-Design Goals
-............
-
-+ Confidential, authenticated git storage and collaboration on any
-  untrusted file host or service. The only information we (by necessity)
-  leak is the approximate size and timing of updates.  PLEASE help me
-  evaluate how well we meet this design goal!
-
+    git remote add cryptremote gcrypt::rsync://example.com:repo
+    git push cryptremote master
+    > gcrypt: Setting up new repository
+    > gcrypt: Remote ID is :id:7VigUnLVYVtZx8oir34R
+    > [ more lines .. ]
+    > To gcrypt::[...]
+    > * [new branch]      master -> master
 
 Configuration
 =============
 
-*gcrypt.keyring*
-        Path to the GPG keyring file containing the public keys of all
-        participants. This file can be created using ``gpg --export``.
+The following ``git-config(1)`` variables are supported:
 
-git-remote-gcrypt respects the variable *user.signingkey*.
+``remote.<name>.gcrypt-participants``
+    ..
+``gcrypt.participants``
+    Space-separated list of GPG key identifiers. The remote is encrypted
+    to these participants and only signatures from these are accepted.
+    ``gpg -k`` lists all public keys you know.
 
-.. NOTE:: GPG configuration applies to public-key encryption, symmetric
-          encryption, and signing. See `man gpg`.
+    If this option is not set, we encrypt to your default key and accept
+    any valid signature. This behavior can also be requested explicitly
+    by setting participants to ``simple``.
 
-All readers of the repository must have their pubkey included in the
-keyring used when pushing. All writers must have the complete set of
-pubkeys available. You can commit the keyring to the repo, further key
-management features do not yet exist.
+    The ``gcrypt-participants`` setting on the remote takes precedence
+    over the repository variable ``gcrypt.participants``.
 
+``user.signingkey``
+    (From regular git configuration) The key to use for signing.  You
+    should set ``user.signingkey`` if your default signing key is not
+    part of the participant list.
+
+Environment Variables
+=====================
+
+*GCRYPT_FULL_REPACK*
+    This environment variable forces full repack when pushing.
 
 Examples
 ========
 
-::
+How to set up a remote for two participants::
 
-    gpg --export YOURKEYID > $PWD/.git/keyring.gpg
-    git config gcrypt.keyring $PWD/.git/keyring.gpg
-    git remote add cryptremote  gcrypt::ssh://example.com:repo
-    git push cryptremote HEAD
+    git remote add cryptremote gcrypt::rsync://example.com:repo
+    git config remote.cryptremote.gcrypt-participants "KEY1 KEY2"
+    git push cryptremote master
+
+How to use a git backend::
+
+    # notice that the target git repo must already exist and its
+    # `next` branch will be overwritten!
+    git remote add gitcrypt gcrypt::git@example.com:repo#next
+    git push gitcrypt master
+
+The URL fragment (`#next` here) indicates which backend branch is used.
 
 Notes
 =====
 
+Collaboration
+    The encryption of the manifest is updated for each push to match the
+    participant configuration. Each pushing user must have the public
+    keys of all collaborators and correct participant config. You can
+    commit a keyring to the repo; further key management features do not
+    yet exist.
+
+Dependencies
+    ``rsync`` and ``curl`` for remotes ``rsync:`` and ``sftp:``
+    respectively. The main executable requires a POSIX-compliant shell
+    that supports ``local``.
+
+GNU Privacy Guard
+    Both GPG 1.4 and 2 are supported. You need a personal GPG key. GPG
+    configuration applies to algorithm choices for public-key
+    encryption, symmetric encryption, and signing. See ``man gpg`` for
+    more information.
+
+Remote ID
+    The Remote ID is not secret; it only ensures that two repositories
+    signed by the same user can be distinguished.  You will see
+    a warning if the Remote ID changes, which should only happen if the
+    remote was re-created.
+
 Repository Format
 .................
 
-+ Protocol::
-
-    EncSign(X)   is sign+encrypt to a PGP key holder
-    Encrypt(K,X) is symmetric encryption
-    Hash(X)      is SHA-224
-
-    B: branch list
-    L: list of the hash (Hi) and key (Ki) for each packfile
-    R: Hash(Repository ID)
-    
-    Store Manifest as EncSign(B || L || R) in filename R
-    Store each packfile P as P' = Encrypt(Ki, P) in filename Hi
-        where Hi = Hash(P') and Ki is a random string
-
-    To read the repository
-
-    decrypt+verify Manifest using private key -> (B, L, R)
-    verify R matches Hash(Requested Repository ID)
-    for Hi, Ki in L:
-        download file Hi from the server -> P'
-        verify Hash(P') matches Hi
-        decrypt P' using Ki -> P then open P with git
-
-    Only packs mentioned in L are downloaded.
+| `EncSign(X):`   Sign and Encrypt to GPG key holder
+| `Encrypt(K,X):` Encrypt using symmetric-key algorithm
+| `Hash(X):`      SHA-2/256
+|
+| `B:` branch list
+| `L:` list of the hash (`Hi`) and key (`Ki`) for each packfile
+| `R:` Remote ID
+|
+| To write the repository:
+|
+| Store each packfile `P` as `Encrypt(Ki, P)` → `P'` in filename `Hi`
+|   where `Ki` is a new random string and `Hash(P')` → `Hi`
+| Store `EncSign(B || L || R)` in the manifest
+|
+| To read the repository:
+|
+| Get manifest, decrypt and verify using GPG keyring → `(B, L, R)`
+| Warn if `R` does not match previously seen Remote ID
+| for each `Hi, Ki` in `L`:
+|   Get file `Hi` from the server → `P'`
+|   Verify `Hash(P')` matches `Hi`
+|   Decrypt `P'` using `Ki` → `P` then open `P` with git
 
 Manifest file
 .............
 
-::
+Example manifest file (with ellipsis for brevity)::
 
-    $ gpg -d < 5a191cea8c1021a95d813c4007c14f2cc987a40880c2f669430f1916
-    b4a4a39365d19282810c19d0f3f24d04dd2d179f refs/tags/version1
-    1d323ddadf4cf1d80fced447e637ab3766b168b7 refs/heads/master
-    pack :SHA224:cfdf36515e0d0820554fe5fd9f00a4bee17bcf88ec8a752d851c46ee \
-    Rc+j8Nv6GOW3mBhWOx6W6jjz3BTX7B6XIJ6RYI+P4TEyy+X6p2PB/fsBL9la0Tuc
-    pack :SHA224:a43ccd208d3bd2ea582dbd5407cb8ed6e18b150b1da25c806115eaa5 \
-    UXR3/R7awFCUJWYdzXzrlkk7E2Acxq/Y4EfEcd62AwGGe0o0QxL+s5CwWI/NvMhb
-    repo :SHA224:5a191cea8c1021a95d813c4007c14f2cc987a40880c2f669430f1916 1
+    $ gpg -d 91bd0c092128cf2e60e1a608c31e92caf1f9c1595f83f2890ef17c0e4881aa0a
+    542051c7cd152644e4995bda63cc3ddffd635958 refs/heads/next
+    3c9e76484c7596eff70b21cbe58408b2774bedad refs/heads/master
+    pack :SHA256:f2ad50316...cd4ba67092dc4 z8YoAnFpMlW...3PkI2mND49P1qm
+    pack :SHA256:a6e17bb4c...426492f379584 82+k2cbiUn7...dgXfyX6wXGpvVa
+    keep :SHA256:f2ad50316...cd4ba67092dc4 1
+    repo :id:OYiSleGirtLubEVqJpFF
 
-+ `field<space>value`, extends until newline.
+Each item extends until newline, and matches one of the following:
 
-+ `field` is one of `[0-9a-f]{40}`, `pack`, `repo`, `keep` (planned),
-  `extn` (extension fields, preserved but unused).
+``<sha-1> <gitref>``
+    Git object id and its ref
 
+``pack :<hashtype>:<hash> <key>``
+    Packfile hash (`Hi`) and corresponding symmetric key (`Ki`).
 
-Yet to be Implemented
-.....................
+``keep :<hashtype>:<hash> <generation>``
+    Packfile hash and its repack generation
 
-+ Repacking the remote repository
-+ Deleting remote refs
-+ Some kind of simple keyring management
+``repo <id>``
+    The remote id
+
+``extn <name> ...``
+    Extension field, preserved but unused.
 
 See Also
 ========
@@ -158,10 +182,9 @@ git-remote-helpers(1), gpg(1)
 License
 =======
 
-git-remote-gcrypt is licensed under the terms of the GNU GPL version 2
-(or at your option, any later version). See http://www.gnu.org/licenses/
+git-remote-gcrypt is licensed under the terms of the GNU GPL version 3
+(or at your option, version 2, or any version later than GPLv3).
+See http://www.gnu.org/licenses/ for more information.
 
-
-.. vim: ft=rst tw=72
 .. this document generates a man page with rst2man
-
+.. vim: ft=rst tw=72 sts=4
